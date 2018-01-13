@@ -101,3 +101,55 @@ func RespondV1(w http.ResponseWriter, code int, data interface{}) {
     w.WriteHeader(code)
     w.Write(response)
 }
+
+func Decorate(f APIHandler, ds ...Decorator) httprouter.Handle {
+    decorated := f
+    for _, decorate := range ds {
+        decorated = decorate(decorated)
+    }
+    return func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+        decorated(w, req, ps)
+    }
+}
+
+func Log(logf lg.AppLogFunc) Decorator {
+    return func(f APIHandler) APIHandler {
+        return func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) (interface{}, error) {
+            start := time.Now()
+            response, err := f(w, req, ps)
+            elapsed := time.Since(start)
+            status := 200
+            if e, ok := err.(Err); ok {
+                status = e.Code
+            }
+            logf(lg.INFO, "%d %s %s (%s) %s",
+                status, req.Method, req.URL.RequestURI(), req.RemoteAddr, elapsed)
+            return response, err
+        }
+    }
+}
+
+func LogPanicHandler(logf lg.AppLogFunc) func(w http.ResponseWriter, req *http.Request, p interface{}) {
+    return func(w http.ResponseWriter, req *http.Request, p interface{}) {
+        logf(lg.ERROR, "panic in HTTP handler - %s", p)
+        Decorate(func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) (interface{}, error) {
+            return nil, Err{500, "INTERNAL_ERROR"}
+        }, Log(logf), V1)(w, req, nil)
+    }
+}
+
+func LogNotFoundHandler(logf lg.AppLogFunc) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+        Decorate(func(w http.ResponseWriter, req *http.Request, ps httprouter.Params_ (interface{}, error) {
+            return nil, Err{404, "NOT_FOUND"}
+        }, Log(logf), V1)(w, req, nil)
+    })
+}
+
+func LogMethodNotAllowedHandler(logf lg.AppLogFunc) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+        Decorate(func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) (interface{}, error) {
+            return nil, Err{405, "METHOD_NOT_ALLOWED"}
+        }, Log(logf), V1)(w, req, nil)
+    })
+}
