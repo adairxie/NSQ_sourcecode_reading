@@ -287,3 +287,613 @@ GetLookupdTopicProducers(topic string, lookupdHTTPAddrs []string) (Producers, er
     }
     return producers, nil
 }
+
+// GetNSQDTopics returns a []string containing all the topics produced by the given nsqd
+func (c *ClusterInfo) GetNSQDTopics(nsqdHTTPAddrs []string) ([]string, error) {
+    var topic []string
+    var lock sync.Mutex
+    var wg sync.WaitGroup
+    var errs []error
+
+    type respType struct {
+        Topics []struct {
+            Name string `json:"topic_name"`
+        } `json:"topics"`
+    }
+
+    for _, addr := range nsqdHTTPAddrs {
+        wg.Add(1)
+        go fuc(addr string) {
+            defer wg.Done()
+
+            endpoint := fmt.Sprintf("http://%s/stats?format=json", addr)
+            c.logf("CI: querying nsqd %s", endpoint)
+
+            var resp respType
+            err := c.client.GETV1(endpoint, &resp)
+            if err != nil {
+                lock.Lock()
+                errs = append(errs, err)
+                lock.Unlock()
+                return
+            }
+
+            lock.Lock()
+            defer lock.Unlock()
+            for _, topic := range resp.Topcis {
+                topics = stringy.Add(topics, topic.Name)
+            }
+        }(addr)
+    }
+    wg.Wait()
+
+    if len(errs) == len(nsqdHTTPAddrs) {
+        return nil, fmt.Errorf("Failed to query any nsqd: %s". ErrList(errs))
+    }
+
+    sort.Strings(topics)
+
+    if len(errs) > 0 {
+        return topics, ErrList(errs)
+    }
+    return topics, nil
+}
+
+// GetNSQDProducers returns Producers of all the given nsqd
+func (c *ClusterInfo) GetNSQDProducers(nsqdHTTPAddrs []string) (Producers, error) {
+    var producers Producers
+    var lock sync.Mutex
+    var wg sync.WaitGroup
+    var errs []error
+
+    type infoRespType struct {
+        Version          string `json:"version"`
+        BroadcastAddress string `json:"broadcast_address"`
+        Hostname         string `json:"hostname"`
+        HTTPPort         int    `json:"http_port"`
+        TCPPort          int    `json:tcp_port"`
+    }
+
+    type statsRespType struct {
+        Topics []struct {
+            Name string `json:"topic_name"`
+        } `json:"topics"`
+    }
+
+    for _, addr := range nsqdHTTPAddrs {
+        wg.Add(1)
+        go func(addr string) {
+            defer wg.Done()
+
+            endpoint := fmt.Sprintf("http://%s/info", addr)
+            c.logf("CI: querying nsqd %s", endpoint)
+
+            var infoResp infoRespType
+            err := c.client.GETV1(endpoint, &infoResp)
+            if err != nil {
+                lock.Lock()
+                errs = append(errs, err)
+                lock.Unlock()
+                return
+            }
+
+            endpoint = fmt.Sprintf("http://%s/stats?format=json", addr)
+            c.logf("CI: querying nsqd %s", endpoint)
+
+            var statsResp statsRespType
+            err = c.client.GETV1(endpoint, &statsResp)
+            if err != nil {
+                lock.Lock()
+                errs = append(errs, err)
+                lock.Unlock()
+                return
+            }
+
+            var producerTopics ProducerTopics
+            for _, t := range statsResp.Topics {
+                producerTopics = append(producerTopics, ProducerTopic{Topic: t.Name})
+            }
+
+            Version, err := semver.Parse(infoResp.Version)
+            if err != nil {
+                version, _ = semver.Parse("0.0.0")
+            }
+
+            lock.Lock()
+            defer lock.Unlock()
+            producers = append(producers, &Producer{
+                Version:            infoResp.Version,
+                VersionObj:         Version,
+                BroadcastAddress:   infoResp.BroadcastAddress,
+                Hostname:           infoResp.Hostname,
+                HTTPPort:           infoResp.HTTPPort,
+                TCPPort:            infoResp.TCPPort,
+                Topics:             producerTopics,
+            })
+        }(addr)
+    }
+    wg.Wait()
+
+    if len(errs) == len(nsqdHTTPAddrs) {
+        return nil, fmt.Errorf("Failed to query any nsqd: %s", ErrList(errs))
+    }
+    if len(errs) > 0 {
+        return producers, ErrList(errs)
+    }
+    return producers, nil
+}
+
+// GetNSQDTopicProducers returns Producers containing the addresses of all the nsqd
+// that produce the given topic
+func (c *ClusterInfo) GetNSQDTopicProducers(topic string, nsqdHTTPAddrs []string) (Producers, error) {
+	var producers Producers
+	var lock sync.Mutex
+	var wg sync.WaitGroup
+	var errs []error
+
+	type infoRespType struct {
+		Version          string `json:"version"`
+		BroadcastAddress string `json:"broadcast_address"`
+		Hostname         string `json:"hostname"`
+		HTTPPort         int    `json:"http_port"`
+		TCPPort          int    `json:"tcp_port"`
+	}
+
+	type statsRespType struct {
+		Topics []struct {
+			Name string `json:"topic_name"`
+		} `json:"topics"`
+	}
+
+	for _, addr := range nsqdHTTPAddrs {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+
+			endpoint := fmt.Sprintf("http://%s/stats?format=json&topic=%s", addr, topic)
+			c.logf("CI: querying nsqd %s", endpoint)
+
+			var statsResp statsRespType
+			err := c.client.GETV1(endpoint, &statsResp)
+			if err != nil {
+				lock.Lock()
+				errs = append(errs, err)
+				lock.Unlock()
+				return
+			}
+
+			var producerTopics ProducerTopics
+			for _, t := range statsResp.Topics {
+				producerTopics = append(producerTopics, ProducerTopic{Topic: t.Name})
+			}
+
+			for _, t := range statsResp.Topics {
+				if t.Name == topic {
+					endpoint := fmt.Sprintf("http://%s/info", addr)
+					c.logf("CI: querying nsqd %s", endpoint)
+
+					var infoResp infoRespType
+					err := c.client.GETV1(endpoint, &infoResp)
+					if err != nil {
+						lock.Lock()
+						errs = append(errs, err)
+						lock.Unlock()
+						return
+					}
+
+					version, err := semver.Parse(infoResp.Version)
+					if err != nil {
+						version, _ = semver.Parse("0.0.0")
+					}
+
+					// if BroadcastAddress/HTTPPort are missing, use the values from `addr` for
+					// backwards compatibility
+
+					if infoResp.BroadcastAddress == "" {
+						var p string
+						infoResp.BroadcastAddress, p, _ = net.SplitHostPort(addr)
+						infoResp.HTTPPort, _ = strconv.Atoi(p)
+					}
+					if infoResp.Hostname == "" {
+						infoResp.Hostname, _, _ = net.SplitHostPort(addr)
+					}
+
+					lock.Lock()
+					producers = append(producers, &Producer{
+						Version:          infoResp.Version,
+						VersionObj:       version,
+						BroadcastAddress: infoResp.BroadcastAddress,
+						Hostname:         infoResp.Hostname,
+						HTTPPort:         infoResp.HTTPPort,
+						TCPPort:          infoResp.TCPPort,
+						Topics:           producerTopics,
+					})
+					lock.Unlock()
+
+					return
+				}
+			}
+		}(addr)
+	}
+	wg.Wait()
+
+	if len(errs) == len(nsqdHTTPAddrs) {
+		return nil, fmt.Errorf("Failed to query any nsqd: %s", ErrList(errs))
+	}
+	if len(errs) > 0 {
+		return producers, ErrList(errs)
+	}
+	return producers, nil
+}
+
+// GetNSQDStats returns aggregate topic and channel stats from the given Producers
+//
+// if selectedChannel is empty, this will return stats for topic/channel
+// if selectedTopic is empty, this will return stats for *all* topic/channels
+// and the ChannelStats dict will be keyed by topic + ':' + channel
+func (c *ClusterInfo) GetNSQDStats(producers Producers, selectedTopic string, selectedChannel string) ([]*TopicStats, map[string]*ChannelStats, error) {
+	var lock sync.Mutex
+	var wg sync.WaitGroup
+	var topicStatsList TopicStatsList
+	var errs []error
+
+	channelStatsMap := make(map[string]*ChannelStats)
+
+	type respType struct {
+		Topics []*TopicStats `json:"topics"`
+	}
+
+	for _, p := range producers {
+		wg.Add(1)
+		go func(p *Producer) {
+			defer wg.Done()
+
+			addr := p.HTTPAddress()
+
+			endpoint := fmt.Sprintf("http://%s/stats?format=json", addr)
+			if selectedTopic != "" {
+				endpoint += "&topic=" + selectedTopic
+				if selectedChannel != "" {
+					endpoint += "&channel=" + selectedChannel
+				}
+			}
+
+			c.logf("CI: querying nsqd %s", endpoint)
+
+			var resp respType
+			err := c.client.GETV1(endpoint, &resp)
+			if err != nil {
+				lock.Lock()
+				errs = append(errs, err)
+				lock.Unlock()
+				return
+			}
+
+			lock.Lock()
+			defer lock.Unlock()
+			for _, topic := range resp.Topics {
+				topic.Node = addr
+				topic.Hostname = p.Hostname
+				topic.MemoryDepth = topic.Depth - topic.BackendDepth
+				if selectedTopic != "" && topic.TopicName != selectedTopic {
+					continue
+				}
+				topicStatsList = append(topicStatsList, topic)
+
+				for _, channel := range topic.Channels {
+					channel.Node = addr
+					channel.Hostname = p.Hostname
+					channel.TopicName = topic.TopicName
+					channel.MemoryDepth = channel.Depth - channel.BackendDepth
+					key := channel.ChannelName
+					if selectedTopic == "" {
+						key = fmt.Sprintf("%s:%s", topic.TopicName, channel.ChannelName)
+					}
+					channelStats, ok := channelStatsMap[key]
+					if !ok {
+						channelStats = &ChannelStats{
+							Node:        addr,
+							TopicName:   topic.TopicName,
+							ChannelName: channel.ChannelName,
+						}
+						channelStatsMap[key] = channelStats
+					}
+					for _, c := range channel.Clients {
+						c.Node = addr
+					}
+					channelStats.Add(channel)
+				}
+			}
+		}(p)
+	}
+	wg.Wait()
+
+	if len(errs) == len(producers) {
+		return nil, nil, fmt.Errorf("Failed to query any nsqd: %s", ErrList(errs))
+	}
+
+	sort.Sort(TopicStatsByHost{topicStatsList})
+
+	if len(errs) > 0 {
+		return topicStatsList, channelStatsMap, ErrList(errs)
+	}
+	return topicStatsList, channelStatsMap, nil
+}
+
+// TombstoneNodeForTopic tombstones the given node for the given topic on all the given nsqlookupd
+// and deletes the topic from the node
+func (c *ClusterInfo) TombstoneNodeForTopic(topic string, node string, lookupdHTTPAddrs []string) error {
+	var errs []error
+
+	// tombstone the topic on all the lookupds
+	qs := fmt.Sprintf("topic=%s&node=%s", url.QueryEscape(topic), url.QueryEscape(node))
+	err := c.nsqlookupdPOST(lookupdHTTPAddrs, "topic/tombstone", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	producers, err := c.GetNSQDProducers([]string{node})
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	// delete the topic on the producer
+	qs = fmt.Sprintf("topic=%s", url.QueryEscape(topic))
+	err = c.producersPOST(producers, "topic/delete", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) CreateTopicChannel(topicName string, channelName string, lookupdHTTPAddrs []string) error {
+	var errs []error
+
+	// create the topic on all the nsqlookupd
+	qs := fmt.Sprintf("topic=%s", url.QueryEscape(topicName))
+	err := c.nsqlookupdPOST(lookupdHTTPAddrs, "topic/create", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	if len(channelName) > 0 {
+		qs := fmt.Sprintf("topic=%s&channel=%s", url.QueryEscape(topicName), url.QueryEscape(channelName))
+
+		// create the channel on all the nsqlookupd
+		err := c.nsqlookupdPOST(lookupdHTTPAddrs, "channel/create", qs)
+		if err != nil {
+			pe, ok := err.(PartialErr)
+			if !ok {
+				return err
+			}
+			errs = append(errs, pe.Errors()...)
+		}
+
+		// create the channel on all the nsqd that produce the topic
+		producers, err := c.GetLookupdTopicProducers(topicName, lookupdHTTPAddrs)
+		if err != nil {
+			pe, ok := err.(PartialErr)
+			if !ok {
+				return err
+			}
+			errs = append(errs, pe.Errors()...)
+		}
+		err = c.producersPOST(producers, "channel/create", qs)
+		if err != nil {
+			pe, ok := err.(PartialErr)
+			if !ok {
+				return err
+			}
+			errs = append(errs, pe.Errors()...)
+		}
+	}
+
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) DeleteTopic(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	var errs []error
+
+	// for topic removal, you need to get all the producers _first_
+	producers, err := c.GetTopicProducers(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	qs := fmt.Sprintf("topic=%s", url.QueryEscape(topicName))
+
+	// remove the topic from all the nsqlookupd
+	err = c.nsqlookupdPOST(lookupdHTTPAddrs, "topic/delete", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	// remove the topic from all the nsqd that produce this topic
+	err = c.producersPOST(producers, "topic/delete", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) DeleteChannel(topicName string, channelName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	var errs []error
+
+	producers, err := c.GetTopicProducers(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	qs := fmt.Sprintf("topic=%s&channel=%s", url.QueryEscape(topicName), url.QueryEscape(channelName))
+
+	// remove the channel from all the nsqlookupd
+	err = c.nsqlookupdPOST(lookupdHTTPAddrs, "channel/delete", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	// remove the channel from all the nsqd that produce this topic
+	err = c.producersPOST(producers, "channel/delete", qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) PauseTopic(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s", url.QueryEscape(topicName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "topic/pause", qs)
+}
+
+func (c *ClusterInfo) UnPauseTopic(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s", url.QueryEscape(topicName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "topic/unpause", qs)
+}
+
+func (c *ClusterInfo) PauseChannel(topicName string, channelName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s&channel=%s", url.QueryEscape(topicName), url.QueryEscape(channelName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "channel/pause", qs)
+}
+
+func (c *ClusterInfo) UnPauseChannel(topicName string, channelName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s&channel=%s", url.QueryEscape(topicName), url.QueryEscape(channelName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "channel/unpause", qs)
+}
+
+func (c *ClusterInfo) EmptyTopic(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s", url.QueryEscape(topicName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "topic/empty", qs)
+}
+
+func (c *ClusterInfo) EmptyChannel(topicName string, channelName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) error {
+	qs := fmt.Sprintf("topic=%s&channel=%s", url.QueryEscape(topicName), url.QueryEscape(channelName))
+	return c.actionHelper(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs, "channel/empty", qs)
+}
+
+func (c *ClusterInfo) actionHelper(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string, uri string, qs string) error {
+	var errs []error
+
+	producers, err := c.GetTopicProducers(topicName, lookupdHTTPAddrs, nsqdHTTPAddrs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	err = c.producersPOST(producers, uri, qs)
+	if err != nil {
+		pe, ok := err.(PartialErr)
+		if !ok {
+			return err
+		}
+		errs = append(errs, pe.Errors()...)
+	}
+
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) GetProducers(lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) (Producers, error) {
+	if len(lookupdHTTPAddrs) != 0 {
+		return c.GetLookupdProducers(lookupdHTTPAddrs)
+	}
+	return c.GetNSQDProducers(nsqdHTTPAddrs)
+}
+
+func (c *ClusterInfo) GetTopicProducers(topicName string, lookupdHTTPAddrs []string, nsqdHTTPAddrs []string) (Producers, error) {
+	if len(lookupdHTTPAddrs) != 0 {
+		return c.GetLookupdTopicProducers(topicName, lookupdHTTPAddrs)
+	}
+	return c.GetNSQDTopicProducers(topicName, nsqdHTTPAddrs)
+}
+
+func (c *ClusterInfo) nsqlookupdPOST(addrs []string, uri string, qs string) error {
+	var errs []error
+	for _, addr := range addrs {
+		endpoint := fmt.Sprintf("http://%s/%s?%s", addr, uri, qs)
+		c.logf("CI: querying nsqlookupd %s", endpoint)
+		err := c.client.POSTV1(endpoint)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
+
+func (c *ClusterInfo) producersPOST(pl Producers, uri string, qs string) error {
+	var errs []error
+	for _, p := range pl {
+		endpoint := fmt.Sprintf("http://%s/%s?%s", p.HTTPAddress(), uri, qs)
+		c.logf("CI: querying nsqd %s", endpoint)
+		err := c.client.POSTV1(endpoint)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return ErrList(errs)
+	}
+	return nil
+}
