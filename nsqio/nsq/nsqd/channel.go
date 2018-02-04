@@ -522,9 +522,69 @@ func (c *Channel) addToDeferredPQ(item *pqueue.Item) {
 }
 
 func (c *Channel) processDeferredQueue(t int64) bool {
+    c.exitMutex.RLock()
+    defer c.exitMutex.RUnlock()
 
+    if c.Exiting() {
+        return false
+    }
+
+    dirty := false
+    for {
+        c.deferredMutex.Lock()
+        item, _ := c.deferredPQ.PeekAndShift(t)
+        c.deferredMutex.Unlock()
+
+        if item == nil {
+            goto exit
+        }
+        dirty = true
+
+        msg := item.Value.(*Message)
+        _, err := c.popDeferredMessage(msg.ID)
+        if err != nil {
+            goto exit
+        }
+        c.put(msg)
+    }
+
+exit:
+    return dirty
 }
 
 func (c *Channel) processInFlightQueue(t int64) bool {
+    c.exitMutex.RLock()
+    defer c.exitMutex.RUnlock()
 
+    if c.Exiting() {
+        return false
+    }
+
+    dirty := false
+    for {
+        c.inFlightMutex.Lock)
+        msg, _ := c.inFlightPQ.PeekAndShift(t)
+        c.inFlightMutex.Unlock()
+
+        if msg == nil {
+            goto exit
+        }
+        dirty = true
+
+        _, err := c.popInFlightMessage(msg.clientID, msg.ID)
+        if err != nil {
+            goto exit
+        }
+        atomic.AddUint64(&c.timeoutCount, 1)
+        c.RLock()
+        client, ok := c.clients[msg.clientID]
+        c.RUnlock()
+        if ok {
+            client.TimeOutMessage()
+        }
+        c.put(msg)
+    }
+
+exit:
+    return dirty
 }
